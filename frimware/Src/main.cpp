@@ -52,15 +52,35 @@
 #include <time.h>
 
 #include "Utils/cli.h"
+#include "Utils/crc.h"
 #include "Utils/terminal_serial.h"
 #include "stm32f1xx_hal.h"
 
+#include "iwdg.h"
 #include "Utils/terminal.h"
 #include "Utils/utils.h"
 #include "usb_device.h"
+#include "segment.h"
+#include "interface_nrf24.h"
 
-#include "samsung_ir.h"
-#include "samsung_ir_cmd.h"
+#define STREET_NODE_ADDRESS     0x00
+#define UPS_NODE_ADDRESS        0x01
+#define UPS12V_NODE_ADDRESS     0x02
+#define FERMENTER_NODE_ADDRESS  0x03
+#define HOUSE_NODE_ADDRESS      0x04
+#define GARAGE_NODE_ADDRESS     0x05
+#define WATER_NODE_ADDRESS      0x06
+#define CLOCK_NODE_ADDRESS      0x07
+#define KITCHEN_NODE_ADDRESS      0x08
+
+#define NODE_ADDRESS KITCHEN_NODE_ADDRESS
+#define MINIMUM_REPORT_RATE 600000// 1800000
+
+static uint32_t last_sent_sample = 0;
+
+uint8_t netAddress[] = {0x23, 0x1B, 0x25};
+uint8_t serverAddress[] = {0x12, 0x3B, 0x45};
+bool reportToServer = false;
 
 /* Private variables ---------------------------------------------------------*/
 RTC_HandleTypeDef hrtc;
@@ -78,58 +98,177 @@ static void MX_SPI1_Init(void);
 static void MX_RTC_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM2_Init(void);
-static void MX_TIM4_Init(void);
 }
 
 /* Private function prototypes -----------------------------------------------*/
-
-uint8_t sample_button()
+enum nodeFrameType_e
 {
-	uint8_t button = 0;
-	GPIO_PinState input = HAL_GPIO_ReadPin(BTN1_GPIO_Port, BTN1_Pin);
-	if(input == GPIO_PIN_SET)
-		button |= 0x01;
+	DATA = 0,
+	COMMAND = 1,
+	ACKNOWLEDGE = 2
+};
 
-	input = HAL_GPIO_ReadPin(BTN2_GPIO_Port, BTN2_Pin);
-	if(input == GPIO_PIN_RESET)
-		button |= 0x02;
+//Node send 32 bytes of data, with the last byte being the 8-bit CRC
+typedef struct {
+	uint8_t nodeAddress;	//1
+	uint8_t frameType;		//1
+	uint32_t timestamp;		//4  6
+	uint8_t inputs;			//1  7
+	uint8_t outputs;		//1  8
+	uint16_t voltages[4];	//8  16
+	uint16_t temperature;	//2  18
+	uint8_t reserved[13]; 	//13 31
+	uint8_t crc;			//1  32
+}__attribute__((packed, aligned(4))) nodeData_s;
 
-	input = HAL_GPIO_ReadPin(BTN3_GPIO_Port, BTN3_Pin);
-	if(input == GPIO_PIN_SET)
-		button |= 0x04;
 
-	return button;
+bool NRFreceivedCB(int pipe, uint8_t *data, int len)
+{
+	if(pipe != 0)
+	{
+		printf(RED("%d NOT correct pipe\n"), pipe);
+		return false;
+	}
+
+	if(CRC_8::crc(data, 32))
+	{
+		printf(RED("CRC error\n"));
+		return false;
+	}
+
+	bool reportNow = false;
+	nodeData_s down;
+	memcpy(&down, data, len);
+	printf("NRF RX [0x%02X]\n", down.nodeAddress);
+
+	//Check of this is not my data
+	if(down.nodeAddress != NODE_ADDRESS)
+	{
+		if(down.nodeAddress == 0xFF)
+		{
+			reportNow = true;
+		}
+		else
+			return false;
+	}
+
+	if(down.frameType == ACKNOWLEDGE)
+	{
+		printf("Main: " GREEN("ACK\n"));
+		return false;
+	}
+
+	printf("RCV Type# %d\n", (int)down.frameType);
+	//printf(" PAYLOAD: %d\n", len);
+	//diag_dump_buf(data, len);
+
+	int hour = (down.timestamp >> 8) & 0xFF;
+	int min = (down.timestamp) & 0xFF;
+	printf("Set time %d:%d\n", hour, min);
+	segment_set(hour, min);
+
+	RTC_TimeTypeDef sTime;
+	sTime.Hours = hour;
+	sTime.Minutes = min;
+	sTime.Seconds = 0;
+	HAL_StatusTypeDef result = HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+	if(result != HAL_OK)
+		printf("Could not set Time!!! %d\n", result);
+
+
+	int month = (down.timestamp >> 24) & 0xFF;
+	int day = (down.timestamp >> 16) & 0xFF;
+	printf("Set date %d:%d\n", month, day);
+
+	RTC_DateTypeDef sDate;
+	HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+	sDate.Month = month;
+	sDate.Date = day;
+	result = HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+	if(result != HAL_OK)
+		printf("Could not set Date!!! %d\n", result);
+
+	//Broadcast pipe
+	if(reportNow)
+	{
+		reportToServer = true;
+	}
+
+	//command to node
+	if(down.frameType == COMMAND)
+	{
+		printf("Set Outputs %d\n", down.outputs);
+
+	}
+
+	return false;
 }
 
-uint8_t prev_button = 0x07;
-void button_run()
+void sampleAnalog(double &temperature, double *voltages)
 {
-	uint8_t curr_button = sample_button();
-	if(prev_button != curr_button)
-	{
-		prev_button = curr_button;
+	uint32_t adc[8] = {};
 
-		switch(curr_button)
+	HAL_ADCEx_Calibration_Start(&hadc1);
+
+	for(int k = 0; k < 4; k++)
+	{
+		HAL_ADC_Start(&hadc1);
+		if(HAL_ADC_PollForConversion(&hadc1, 1000) == HAL_OK)
 		{
-		case 0x06:
-			printf("Power AC ON\n");
-			samsung_ir_setAC(25);
-			HAL_Delay(200);
-			break;
-		case 0x05:
-			printf("Power FAN ON\n");
-			samsung_ir_setFan(1);
-			HAL_Delay(200);
-			break;
-		case 0x03:
-			printf("Power OFF\n");
-			samsung_ir_setAC(0);
-			HAL_Delay(200);
-			break;
-		default:
-			break;
+			adc[k] += HAL_ADC_GetValue(&hadc1);
+			//printf("ADC: %d\n", adc);
 		}
 	}
+	HAL_ADC_Stop(&hadc1);
+
+	//this amount of steps measure 1.2V
+	double step = 1.2 / adc[0];
+	//printf("ADC Step %0.3f\n", step);
+
+	double voltage = ((double)adc[1]) * step;
+	//	printf(" *	%d\n", (int)voltage);
+	voltage = 1.43 - voltage;
+	//	printf(" -	%d\n", voltage);
+	voltage /= 0.0043;
+	//printf(" /	%d\n", voltage);
+	temperature = (25.0 + voltage) - 11;
+
+	//measure raw voltage
+	voltages[0] = (((double)adc[2] * step));
+	voltages[1] = (((double)adc[3] * step));
+
+}
+
+void report(uint8_t *address, bool sample)
+{
+//	//Report 60 seconds apart
+//	if(lastReport)
+//	{
+//		if((lastReport + 60000) > HAL_GetTick())
+//			return;
+//	}
+//	lastReport = HAL_GetTick();
+
+	double cpu, voltages[2];
+	sampleAnalog(cpu, voltages);
+	nodeData_s pay;
+	memset(&pay, 0, 32);
+	pay.nodeAddress = NODE_ADDRESS;
+	pay.timestamp = HAL_GetTick();
+	pay.temperature = ((voltages[0] * 100) - 273) * 1000;
+
+	if(sample)
+		pay.inputs |= 0x02;
+
+	pay.crc = CRC_8::crc((uint8_t*)&pay, 31);
+
+	//report status in voltages[0-1]
+	printf("TX result %d\n", InterfaceNRF24::get()->transmit(address, (uint8_t*)&pay, 32));
+}
+
+void reportNow(bool sample)
+{
+	report(serverAddress, sample);
 }
 
 int main(void)
@@ -143,7 +282,8 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  //MX_RTC_Init();
+  MX_RTC_Init();
+  MX_IWDG_Init();
 
   HAL_Delay(1000);
 
@@ -164,34 +304,63 @@ int main(void)
 		  0
   };
 
+
+
   terminal_init((sTerminalInterface_t **)&interfaces);
 
-  //MX_SPI1_Init();
+  segment_init();
+  RTC_TimeTypeDef sTime;
+  HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+  segment_set(sTime.Hours, sTime.Minutes);
+
+  MX_SPI1_Init();
   MX_ADC1_Init();
   MX_TIM2_Init();
-  MX_TIM4_Init();
+  HAL_TIM_OC_Start_IT(&htim2, TIM_CHANNEL_1);
 
-
-  samsung_ir_init(&htim2, TIM_CHANNEL_1, &htim4, TIM_CHANNEL_4);
+  InterfaceNRF24::init(&hspi1, netAddress, 3);
+  InterfaceNRF24::get()->setRXcb(NRFreceivedCB);
 
   /* Infinite loop */
+  uint32_t tick = HAL_GetTick() + 30000;
   while (1)
   {
 	  terminal_run();
-	  button_run();
+	  InterfaceNRF24::get()->run();
+
+	  if(reportToServer)
+	  {
+		  //before transmitting wait 500 ms intervals of node address
+		  HAL_Delay(200 + (NODE_ADDRESS * 200));
+		  reportNow(false);
+		  reportToServer = false;
+	  }
 
       HAL_Delay(100);
       HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+      MX_IWDG_Refresh();
+
+      if(tick < HAL_GetTick())
+      {
+    	  HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+    	  segment_set(sTime.Hours, sTime.Minutes);
+    	  tick = HAL_GetTick() + 30000;
+      }
+
+      if(last_sent_sample < HAL_GetTick())
+      {
+    	  last_sent_sample = HAL_GetTick() + MINIMUM_REPORT_RATE;
+    	  reportNow(true);
+      }
   }
-
 }
-
 
 
 void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	if(htim == &htim2)
-		samsung_ir_service(htim);
+		segment_run();
+
 }
 
 /** System Clock Configuration
@@ -332,23 +501,31 @@ static void MX_GPIO_Init(void)
 	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
 
+	/*Configure GPIO pin : SPI1_CS_Pin */
+	GPIO_InitStruct.Pin = SPI1_CS_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_PULLUP;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(SPI1_CS_GPIO_Port, &GPIO_InitStruct);
+
+	/*Configure GPIO pin : NRF_CE_Pin */
+	GPIO_InitStruct.Pin = NRF_CE_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_PULLUP;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(NRF_CE_GPIO_Port, &GPIO_InitStruct);
+
+	/*Configure GPIO pin : NRF_IRQ_Pin */
+	GPIO_InitStruct.Pin = NRF_IRQ_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+	GPIO_InitStruct.Pull = GPIO_PULLUP;
+	HAL_GPIO_Init(NRF_IRQ_GPIO_Port, &GPIO_InitStruct);
+
 	/*Configure GPIO pin : LED_Pin */
 	GPIO_InitStruct.Pin = LED_Pin;
 	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
 	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
 	HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);
-
-	GPIO_InitStruct.Pin = BTN1_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-	GPIO_InitStruct.Pull = GPIO_PULLUP;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-	HAL_GPIO_Init(BTN1_GPIO_Port, &GPIO_InitStruct);
-
-	GPIO_InitStruct.Pin = BTN2_Pin;
-	HAL_GPIO_Init(BTN2_GPIO_Port, &GPIO_InitStruct);
-
-	GPIO_InitStruct.Pin = BTN3_Pin;
-	HAL_GPIO_Init(BTN3_GPIO_Port, &GPIO_InitStruct);
 
 	/*Configure GPIO pin : ADC12_IN0 */
 	GPIO_InitStruct.Pin = GPIO_PIN_0;
@@ -361,6 +538,37 @@ static void MX_GPIO_Init(void)
 	GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
 	GPIO_InitStruct.Pull = GPIO_PULLDOWN;
 	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+	/*Configure 7 Segment GPIO pins */
+	GPIO_InitStruct.Pin = SEG_A_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_MEDIUM;
+	HAL_GPIO_Init(SEG_A_GPIO_Port, &GPIO_InitStruct);
+
+	GPIO_InitStruct.Pin = SEG_B_Pin;
+	HAL_GPIO_Init(SEG_B_GPIO_Port, &GPIO_InitStruct);
+	GPIO_InitStruct.Pin = SEG_C_Pin;
+	HAL_GPIO_Init(SEG_C_GPIO_Port, &GPIO_InitStruct);
+	GPIO_InitStruct.Pin = SEG_D_Pin;
+	HAL_GPIO_Init(SEG_D_GPIO_Port, &GPIO_InitStruct);
+	GPIO_InitStruct.Pin = SEG_E_Pin;
+	HAL_GPIO_Init(SEG_E_GPIO_Port, &GPIO_InitStruct);
+	GPIO_InitStruct.Pin = SEG_F_Pin;
+	HAL_GPIO_Init(SEG_F_GPIO_Port, &GPIO_InitStruct);
+	GPIO_InitStruct.Pin = SEG_G_Pin;
+	HAL_GPIO_Init(SEG_G_GPIO_Port, &GPIO_InitStruct);
+	GPIO_InitStruct.Pin = SEG_DP_Pin;
+	HAL_GPIO_Init(SEG_DP_GPIO_Port, &GPIO_InitStruct);
+
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pin = SEG_HT_Pin;
+	HAL_GPIO_Init(SEG_HT_GPIO_Port, &GPIO_InitStruct);
+	GPIO_InitStruct.Pin = SEG_HO_Pin;
+	HAL_GPIO_Init(SEG_HO_GPIO_Port, &GPIO_InitStruct);
+	GPIO_InitStruct.Pin = SEG_MT_Pin;
+	HAL_GPIO_Init(SEG_MT_GPIO_Port, &GPIO_InitStruct);
+	GPIO_InitStruct.Pin = SEG_MO_Pin;
+	HAL_GPIO_Init(SEG_MO_GPIO_Port, &GPIO_InitStruct);
 }
 
 /* SPI1 init function */
@@ -436,6 +644,7 @@ static void MX_ADC1_Init(void)
   //printf("%08X\n", ADC1->SQR1);
 }
 
+
 /* TIM2 init function
  * This will setup timer 2 to interrupt,
  * Timer 2 channel 1 interrupt drives the IR state machine
@@ -455,7 +664,7 @@ static void MX_TIM2_Init(void)
 	htim2.Instance = TIM2;
 	htim2.Init.Prescaler = 30;
 	htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-	htim2.Init.Period = 1430;
+	htim2.Init.Period = 0x1FFF;
 	htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV4;
 	htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
 	if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
@@ -497,114 +706,19 @@ static void MX_TIM2_Init(void)
 	{
 		printf("TIM2 Init ERROR line: %d\n", __LINE__);
 	}
+//
+//	sConfigOC.OCMode = TIM_OCMODE_TOGGLE;
+//	sConfigOC.Pulse = 0;
+//	sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+//	sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+//	if (HAL_TIM_OC_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+//	{
+//		printf("TIM2 Init ERROR line: %d\n", __LINE__);
+//	}
 
-	sConfigOC.OCMode = TIM_OCMODE_TOGGLE;
-	sConfigOC.Pulse = 0;
-	sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-	sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-	if (HAL_TIM_OC_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
-	{
-		printf("TIM2 Init ERROR line: %d\n", __LINE__);
-	}
-
-
-	GPIO_InitTypeDef GPIO_InitStruct;
-	GPIO_InitStruct.Pin = IR_CCO_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-	HAL_GPIO_Init(IR_CCO_GPIO_Port, &GPIO_InitStruct);
 
 	HAL_TIM_Base_Start(&htim2);
 	printf("TIM2 Init\n");
-}
-
-/* TIM4 init function
- * This function starts timer 4 and should output a 38kHz signal on
- *  channel 4, or any configured output capture pin.
- *  The IR state machine will enable / disable the pin accordingly*/
-static void MX_TIM4_Init(void)
-{
-	__HAL_RCC_TIM4_CLK_ENABLE();
-
-	//printf("APB1 @ %dHz\n", (int)HAL_RCC_GetPCLK1Freq());
-	TIM_ClockConfigTypeDef sClockSourceConfig;
-	TIM_MasterConfigTypeDef sMasterConfig;
-	TIM_OC_InitTypeDef sConfigOC;
-
-	htim4.Instance = TIM4;
-	htim4.Init.Prescaler = 3; //input clock is 12MHz (36 000 000 / 3)
-	htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
-	htim4.Init.Period = 236;//236 = 38kHz  230=39kHz
-	htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV4;
-	htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-	if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
-	{
-		_Error_Handler(__FILE__, __LINE__);
-	}
-
-	sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-	if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
-	{
-		_Error_Handler(__FILE__, __LINE__);
-	}
-
-	if (HAL_TIM_OC_Init(&htim4) != HAL_OK)
-	{
-		_Error_Handler(__FILE__, __LINE__);
-	}
-
-	sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-	sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-	if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
-	{
-		_Error_Handler(__FILE__, __LINE__);
-	}
-
-	sConfigOC.OCMode = TIM_OCMODE_TIMING;
-	sConfigOC.Pulse = 0;
-	sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-	sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-	if (HAL_TIM_OC_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
-	{
-		_Error_Handler(__FILE__, __LINE__);
-	}
-
-//	HAL_TIM_OC_Start_IT(&htim4, TIM_CHANNEL_1);
-
-	sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-	sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-	if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
-	{
-		printf("TIM2 Init ERROR line: %d\n", __LINE__);
-	}
-
-	sConfigOC.OCMode = TIM_OCMODE_TOGGLE;
-	sConfigOC.Pulse = 0;
-	sConfigOC.OCPolarity = TIM_OCPOLARITY_LOW;
-	sConfigOC.OCIdleState = TIM_OCIDLESTATE_SET;
-	sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-	if (HAL_TIM_OC_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
-	{
-		printf("TIM2 Init ERROR line: %d\n", __LINE__);
-	}
-
-
-//	///setup output pin
-//	GPIO_InitTypeDef GPIO_InitStruct;
-//	GPIO_InitStruct.Pin = IR_CCO_Pin;
-//	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-//	GPIO_InitStruct.Pull = GPIO_NOPULL;
-//	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-//	HAL_GPIO_Init(IR_CCO_GPIO_Port, &GPIO_InitStruct);
-//	HAL_GPIO_WritePin(IR_CCO_GPIO_Port, IR_CCO_Pin, GPIO_PIN_SET);
-
-
-	HAL_TIM_Base_Start(&htim4);
-
-
-	printf("TIM4 Init\n");
-
 }
 
 const char *getDayName(int week_day)
@@ -634,41 +748,19 @@ const char *getDayName(int week_day)
  extern "C" {
 #endif
 
-void button_debug(uint8_t argc, char **argv)
-{
-	uint8_t button = sample_button();
-	printf("button: %02X\n", button);
 
-}
+ void adc_debug(uint8_t argc, char **argv)
+ {
+ 	double temperature, voltages[8];
+ 	sampleAnalog(temperature, voltages);
 
-void ir_fan_debug(uint8_t argc, char **argv)
-{
-	if(argc > 1)
-	{
-		int level = atoi(argv[1]);
-		printf("Setting fan level: %d\n", level);
-		samsung_ir_setFan(level);
-	}
-	else
-		samsung_ir_setFan(0);
-}
+ 	printf("T: %0.3f\n", temperature);
+ 	printf("V1: %0.3f\n", voltages[0]);
+ 	printf("V2: %0.3f\n", voltages[1]);
 
-void ir_ac_debug(uint8_t argc, char **argv)
-{
-	if(argc > 1)
-	{
-		int temp = atoi(argv[1]);
-		printf("Setting AC: %d\n", temp);
-		samsung_ir_setAC(temp);
-	}
-	else
-		samsung_ir_setAC(0);
-}
-
-void ir_off_debug(uint8_t argc, char **argv)
-{
-	samsung_ir_setAC(0);
-}
+ 	double ext_temp = (voltages[0] * 100) - 273;
+ 	printf("ET: %0.3f\n", ext_temp);
+ }
 
 void rtc_debug(uint8_t argc, char **argv)
 {

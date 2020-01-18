@@ -49,11 +49,13 @@ Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pwr.c \
 Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pcd_ex.c \
 Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_cortex.c \
 Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio_ex.c \
+Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_iwdg.c \
 Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_dma.c
 
 # C++ sources
 CXX_SOURCES =  \
-$(wildcard Src/*.cpp)
+$(wildcard Src/*.cpp) \
+$(wildcard Utils/Src/*.cpp)
 
 # ASM sources
 ASM_SOURCES =  \

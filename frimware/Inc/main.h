@@ -59,15 +59,38 @@
 
 #define LED_GPIO_Port GPIOC
 #define LED_Pin GPIO_PIN_13
-#define BTN1_GPIO_Port GPIOA
-#define BTN1_Pin GPIO_PIN_5
-#define BTN2_GPIO_Port GPIOA
-#define BTN2_Pin GPIO_PIN_6
-#define BTN3_GPIO_Port GPIOA
-#define BTN3_Pin GPIO_PIN_7
-#define IR_CCO_GPIO_Port GPIOB
-#define IR_CCO_Pin GPIO_PIN_9
 
+#define SPI1_CS_GPIO_Port GPIOA
+#define SPI1_CS_Pin GPIO_PIN_4
+#define NRF_CE_GPIO_Port GPIOA
+#define NRF_CE_Pin GPIO_PIN_3
+#define NRF_IRQ_GPIO_Port GPIOA
+#define NRF_IRQ_Pin GPIO_PIN_2
+
+#define SEG_A_GPIO_Port GPIOB
+#define SEG_A_Pin GPIO_PIN_9
+#define SEG_B_GPIO_Port GPIOB
+#define SEG_B_Pin GPIO_PIN_8
+#define SEG_C_GPIO_Port GPIOB
+#define SEG_C_Pin GPIO_PIN_7
+#define SEG_D_GPIO_Port GPIOB
+#define SEG_D_Pin GPIO_PIN_4
+#define SEG_E_GPIO_Port GPIOB
+#define SEG_E_Pin GPIO_PIN_3
+#define SEG_F_GPIO_Port GPIOB
+#define SEG_F_Pin GPIO_PIN_6
+#define SEG_G_GPIO_Port GPIOB
+#define SEG_G_Pin GPIO_PIN_10
+#define SEG_DP_GPIO_Port GPIOA
+#define SEG_DP_Pin GPIO_PIN_8
+#define SEG_HT_GPIO_Port GPIOB
+#define SEG_HT_Pin GPIO_PIN_15
+#define SEG_HO_GPIO_Port GPIOB
+#define SEG_HO_Pin GPIO_PIN_14
+#define SEG_MT_GPIO_Port GPIOB
+#define SEG_MT_Pin GPIO_PIN_13
+#define SEG_MO_GPIO_Port GPIOB
+#define SEG_MO_Pin GPIO_PIN_12
 
 /* ########################## Assert Selection ############################## */
 /**

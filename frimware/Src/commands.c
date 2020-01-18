@@ -6,22 +6,9 @@
 void rtc_debug(uint8_t argc, char **argv);
 const sTermEntry_t rtcEntry =
 { "date", "RTC date", rtc_debug };
-
-void ir_fan_debug(uint8_t argc, char **argv);
-const sTermEntry_t fanEntry =
-{ "f", "Start Fan", ir_fan_debug };
-
-void ir_ac_debug(uint8_t argc, char **argv);
-const sTermEntry_t acEntry =
-{ "a", "Start AC", ir_ac_debug };
-
-void ir_off_debug(uint8_t argc, char **argv);
-const sTermEntry_t offEntry =
-{ "o", "Switch AC off", ir_off_debug };
-
-void button_debug(uint8_t argc, char **argv);
-const sTermEntry_t buttonEntry =
-{ "i", "Sample inputs", button_debug };
+void adc_debug(uint8_t argc, char **argv);
+const sTermEntry_t adcEntry =
+{ "a", "Sample ADC", adc_debug };
 
 const sTermEntry_t *cli_entries[] =
 {
@@ -30,9 +17,6 @@ const sTermEntry_t *cli_entries[] =
       &rebootEntry,
       &bootEntry,
 	  &rtcEntry,
-	  &fanEntry,
-	  &offEntry,
-	  &acEntry,
-	  &buttonEntry,
+	  &adcEntry,
       0
 };
