@@ -16,6 +16,8 @@ static const uint32_t digits[] ={
 };
 
 static uint8_t seg = 0;
+static uint8_t counter = 1;
+static uint8_t _pwm = 0;
 static uint8_t hour_tens = 0;
 static uint8_t hour_ones = 1;
 static uint8_t min_tens = 2;
@@ -34,15 +36,27 @@ void segment_init()
 
 void segment_run()
 {
-	HAL_GPIO_WritePin(SEG_HT_GPIO_Port, SEG_HT_Pin, GPIO_PIN_RESET);
-	HAL_GPIO_WritePin(SEG_HT_GPIO_Port, SEG_HO_Pin, GPIO_PIN_RESET);
-	HAL_GPIO_WritePin(SEG_HT_GPIO_Port, SEG_MT_Pin, GPIO_PIN_RESET);
-	HAL_GPIO_WritePin(SEG_HT_GPIO_Port, SEG_MO_Pin, GPIO_PIN_RESET);
+	//pulse width
+	if(counter < _pwm) {
+		GPIOB->ODR &= ~(0xF000);
+	}
 
+	if(counter-- > 0)
+		return;
+
+	//counter overrun, restart and go to next digit
+	counter = 128;
+
+	//ensure all digits are off
+	GPIOB->ODR &= ~(0xF000);
 	switch(seg)
 	{
 	case 0:
-		GPIOB->ODR = digits[hour_tens];
+		if(hour_tens == 0)
+			GPIOB->ODR = 0x7D8;
+		else
+			GPIOB->ODR = digits[hour_tens];
+
 		HAL_GPIO_WritePin(SEG_HT_GPIO_Port, SEG_HT_Pin, GPIO_PIN_SET);
 		seg++;
 		break;
@@ -82,4 +96,9 @@ void segment_set(uint8_t hour, uint8_t min)
 	if(val <= 9)
 		min_ones = val;
 
+}
+
+void segment_pwm(uint8_t pwm)
+{
+	_pwm = pwm;
 }

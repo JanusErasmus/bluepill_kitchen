@@ -345,6 +345,13 @@ int main(void)
     	  HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
     	  segment_set(sTime.Hours, sTime.Minutes);
     	  tick = HAL_GetTick() + 30000;
+
+    	  double cpu, voltages[2];
+    	  sampleAnalog(cpu, voltages);
+    	  if(voltages[1] > 1.5)
+    		  segment_pwm(96);
+    	  else
+    		  segment_pwm(0);
       }
 
       if(last_sent_sample < HAL_GetTick())
@@ -664,7 +671,7 @@ static void MX_TIM2_Init(void)
 	htim2.Instance = TIM2;
 	htim2.Init.Prescaler = 30;
 	htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-	htim2.Init.Period = 0x1FFF;
+	htim2.Init.Period = 0x3F;
 	htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV4;
 	htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
 	if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
@@ -792,6 +799,15 @@ void rtc_debug(uint8_t argc, char **argv)
 	printf("RTC date: %s %d\n", getDayName(sDate.WeekDay), (int)HAL_RTC_SecondsSinceEpoch(sDate, sTime));
 	printf(" - %04d-%02d-%02d ", 2000 + sDate.Year, sDate.Month, sDate.Date);
 	printf("%02d:%02d:%02d\n", sTime.Hours, sTime.Minutes, sTime.Seconds);
+}
+
+void seg_debug(uint8_t argc, char **argv)
+{
+	if(argc > 1)
+	{
+		uint8_t pwm = atoi(argv[1]);
+		segment_pwm(pwm);
+	}
 }
 
 #ifdef __cplusplus

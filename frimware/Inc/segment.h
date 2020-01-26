@@ -14,6 +14,7 @@ extern "C" {
 void segment_init();
 void segment_run();
 void segment_set(uint8_t hour, uint8_t min);
+void segment_pwm(uint8_t pwm);
 
 #ifdef __cplusplus
 }
